@@ -1,0 +1,31 @@
+services:
+  strm-gen:
+    container_name: strm-gen
+    image: bossjun/strm-gen:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      # Alist（小雅）地址：g-box 为 host 网络时可直接用 127.0.0.1:5678
+      ALIST_BASE: "http://127.0.0.1:5678"
+      ALIST_USERNAME: "wxs"
+      ALIST_PASSWORD: "change-me"
+      # .strm 内写入的对外地址（必须外网/VidHub 可直连）
+      PUBLIC_PREFIX: "https://xiaoya.example.com:15617"
+      # 生成后触发 Emby 扫描（可留空则不触发）
+      EMBY_PUBLIC: "https://xemby.example.com:15617"
+      EMBY_API_KEY: "your-emby-api-key"
+      EMBY_CONTAINER: "emby"
+      AUTO_SCAN: "true"
+      TZ: "Asia/Shanghai"
+      # 定时：分 时 日 月 周
+      CRON: "0 */3 * * *"
+      # 目录映射：[{alist_path, type(movie|tv), emby_path}]
+      MAPPINGS: >-
+        [
+          {"alist_path":"/115网盘/影视库/电影","type":"movie","emby_path":"/media/115/电影"},
+          {"alist_path":"/115网盘/影视库/电视剧","type":"tv","emby_path":"/media/115/电视剧"}
+        ]
+    volumes:
+      # 需要 docker.sock 才能把生成结果写进 Emby 容器（容器内 /media 未挂载到宿主机时）
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./strmgen-out:/out

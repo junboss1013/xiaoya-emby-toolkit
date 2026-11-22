@@ -1,0 +1,17 @@
+services:
+  gbox-image-cache-fix:
+    container_name: gbox-image-cache-fix
+    image: bossjun/gbox-image-cache-fix:1.0.1
+    restart: unless-stopped
+    environment:
+      TARGET_NAME: "g-box"                 # 小雅主容器名（bill 版一般为 g-box）
+      TARGET_IMAGE_MATCH: "ailg/g-box"     # 容器名变了时的兜底匹配（按镜像名）
+      INTERVAL: "20"                       # 巡检间隔（秒）
+      TZ: "Asia/Shanghai"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
