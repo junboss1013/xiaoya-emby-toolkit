@@ -1,13 +1,15 @@
 services:
   gbox-image-cache-fix:
     container_name: gbox-image-cache-fix
-    image: bossjun/gbox-image-cache-fix:1.0.2
+    image: bossjun/gbox-image-cache-fix:1.0.3
     restart: unless-stopped
     environment:
       TARGET_NAME: "g-box"                 # 小雅主容器名（bill 版一般为 g-box）
       TARGET_IMAGE_MATCH: "ailg/g-box"     # 容器名变了时的兜底匹配（按镜像名）
       ENABLE_GZIP: "true"                  # 开启 gzip（详情页 JSON 体积约 -55%）
       ENABLE_LOG_LEVEL: "true"             # error_log 级别降到 error，防止日志写爆
+      ENABLE_IMG_CACHE: "true"              # 图片缓存 key 去 api_key + 客户端缓存头 + stale-while-revalidate
+      IMG_MAX_AGE: "604800"                # 图片客户端缓存 7 天（0=不改缓存头）
       LOG_MAX_MB: "200"                    # access/error 日志超过该体积自动截断，0=不截断
       INTERVAL: "20"                       # 巡检间隔（秒）
       TZ: "Asia/Shanghai"

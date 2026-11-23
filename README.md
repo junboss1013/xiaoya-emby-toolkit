@@ -5,7 +5,7 @@
 
 | 组件 | 镜像 | 解决的问题 |
 | --- | --- | --- |
-| `image-cache-fix` | `bossjun/gbox-image-cache-fix:1.0.2` | ① Emby 缩略图缓存 key 忽略 `MaxWidth/Quality` 导致首屏慢；② 详情页 JSON 未压缩、外网加载慢；③ nginx 日志写爆（曾 2.3GB）拖慢磁盘 |
+| `image-cache-fix` | `bossjun/gbox-image-cache-fix:1.0.3` | ① Emby 缩略图缓存 key 忽略 `MaxWidth/Quality` 导致首屏慢；② 详情页 JSON 未压缩、外网加载慢；③ nginx 日志写爆（曾 2.3GB）拖慢磁盘；④ 图片缓存 key 被 api_key 放大；⑤ 图片缺 `max-age` 导致客户端每次重下 |
 | `strm-gen` | `bossjun/strm-gen` | STRM 指向仅容器内可解析的地址，外网起播靠服务端中转，慢且耗上行 |
 
 ---
@@ -115,7 +115,54 @@ gzip_vary on;
 
 结论：**不要改写请求参数**。要图片变小，应在客户端请求时带 `MaxWidth`（配合
 `imageCachePolicy=1` 让不同尺寸各自缓存），而不是在 nginx 里偷偷改参数。
-`latest` 与 `1.0.2` 均为不含压缩的版本；`1.1.x` 仅作历史保留，不建议使用。
+`latest` 与 `1.0.3` 均为不含压缩的版本；`1.1.x` 仅作历史保留，不建议使用。
+
+## 一·5、图片缓存 key 与客户端缓存头（1.0.3 新增）
+
+### 1）缓存 key 去掉 `api_key`
+
+`imageCachePolicy = 1` 时，图片的 `proxy_cache_key` 直接取 `$request_uri`，等于把
+`api_key` / 登录 token 也算进了缓存 key：
+
+```
+/emby/Items/123/Images/Primary?maxWidth=400&quality=90&api_key=<token>
+```
+
+同一个用户重新登录、换客户端（token 变了）后，他看过的图会在缓存里**再存一份**，
+等于把自己的缓存热度清零。1.0.3 在 `emby.conf` 里加了一个 `map`，把 `api_key`
+从 key 里剥掉（尺寸、画质、`tag` 仍然各自独立）：
+
+```nginx
+map $args $img_cache_args {
+    default                                        $args;
+    "~^(?<ck_a>.*?)(&?)api_key=[^&]*$"             $ck_a;
+    "~^api_key=[^&]*&(?<ck_b>.*)$"                 $ck_b;
+    "~^(?<ck_c>.*?)(&?)api_key=[^&]*(?<ck_d>&.*)$" "$ck_c$ck_d";
+}
+...
+set $tmp_proxy_cache_key "$uri?$img_cache_args";
+```
+
+安全性：Emby 的图片接口本身**不校验** `api_key`（实测 `?api_key=deadbeef` 也返回 200），
+剥掉它只影响缓存 key，不影响鉴权与内容；上游请求仍然带着原始 `api_key`。
+
+实测四种入参（固定 key / 登录 token / 不带 key / key 在开头）现在共用同一条缓存，
+而 `maxWidth=300/400/1080` 仍是三条独立缓存（分别 33 KB / 48 KB / 226 KB，不会串图）。
+
+### 2）图片加客户端缓存头
+
+Emby 原样返回的是 `Cache-Control: public`（**没有 max-age**），客户端无法判断能缓存多久，
+每次打开同一个详情页都要把海报重下一遍。1.0.3 改为：
+
+```nginx
+proxy_hide_header Cache-Control;
+add_header Cache-Control "public, max-age=604800";   # 7 天，IMG_MAX_AGE 可调
+proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+proxy_cache_background_update on;
+```
+
+`IMAGE_TAG` 变化时客户端 URL 会带新的 `tag=`，所以改图能立刻看到；对不带 `tag` 的请求
+最多 7 天旧图，嫌长就把 `IMG_MAX_AGE` 调小（如 `86400`）。
 
 ---
 
@@ -133,10 +180,10 @@ docker logs -f gbox-image-cache-fix
 期望日志：
 
 ```
-[2026-11-23 10:56:33] 守护启动 v1.0.2：target=g-box image~ailg/g-box gzip=true loglevel=true logmax=200MB interval=20s mode=loop
-（小雅重建后）已应用优化 [policy,gzip,gzip-params,hashsize,loglevel] 并 reload nginx（g-box）
+[2026-11-23 11:34:14] 守护启动 v1.0.3：target=g-box image~ailg/g-box gzip=true loglevel=true logmax=200MB imgcache=true max-age=604800s interval=20s mode=loop
+（小雅重建后）已应用优化 [policy,gzip,gzip-params,hashsize,loglevel,img-map,img-key,img-cachehdr] 并 reload nginx（g-box）
 （日志超限时）已应用优化 [logtrunc:access.log=1073805189]（g-box）
-（稳定后）容器 g-box 已处于优化状态（imageCachePolicy=1 / gzip on / error_log error），无需操作
+（稳定后）容器 g-box 已处于优化状态（policy=1 / gzip on / error_log error / img-cache key+max-age），无需操作
 ```
 
 | 环境变量 | 默认 | 说明 |
@@ -145,6 +192,9 @@ docker logs -f gbox-image-cache-fix
 | `TARGET_IMAGE_MATCH` | `ailg/g-box` | 容器名被改时的兜底匹配（按镜像名模糊匹配） |
 | `ENABLE_GZIP` | `true` | 是否开启 gzip |
 | `ENABLE_LOG_LEVEL` | `true` | 是否把 `error_log` 级别降到 `error` |
+| `ENABLE_IMG_CACHE` | `true` | 是否改图片缓存 key（去 api_key）、加客户端缓存头与 stale |
+| `IMG_MAX_AGE` | `604800` | 图片客户端缓存秒数（7 天），`0` = 不改缓存头 |
+| `EMBY_CONF` | `/etc/nginx/http.d/emby.conf` | emby 站点配置路径（小雅改版时用）
 | `LOG_MAX_MB` | `200` | `access.log`/`error.log` 超过该体积自动截断，`0` = 不截断 |
 | `INTERVAL` | `20` | 巡检间隔（秒） |
 | `CONFIG_PATH` | `/etc/nginx/http.d/config/constant-ext.js` | 缓存策略文件路径（小雅改版时用） |
@@ -154,11 +204,11 @@ docker logs -f gbox-image-cache-fix
 
 ```bash
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-  bossjun/gbox-image-cache-fix:1.0.2 once
+  bossjun/gbox-image-cache-fix:1.0.3 once
 ```
 
-安全设计：改写 `nginx.conf` 前先备份（`.bak_gboxfix`），改完执行 `nginx -t -c <该文件>`；
-校验不通过**自动回滚**并打日志，绝不会把 nginx 改成起不来的状态。
+安全设计：改写 `nginx.conf` / `emby.conf` 前先备份（`.bak_gboxfix`），改完执行 `nginx -t`；
+校验不通过**自动回滚全部文件**并打日志，绝不会把 nginx 改成起不来的状态。
 
 ### 2）strm-gen
 
@@ -179,8 +229,8 @@ docker logs -f strm-gen        # 运行明细见 ./strmgen-out/run.log
 ```bash
 # image-cache-fix
 cd image-cache-fix
-docker build -t bossjun/gbox-image-cache-fix:1.0.2 -t bossjun/gbox-image-cache-fix:latest .
-docker push bossjun/gbox-image-cache-fix:1.0.2
+docker build -t bossjun/gbox-image-cache-fix:1.0.3 -t bossjun/gbox-image-cache-fix:latest .
+docker push bossjun/gbox-image-cache-fix:1.0.3
 docker push bossjun/gbox-image-cache-fix:latest
 
 # strm-gen
@@ -192,7 +242,7 @@ docker push bossjun/strm-gen:latest
 
 - `image-cache-fix` 需要读写 `docker.sock`，等于宿主机 root 权限，请只在自有设备上部署。
 - 若小雅后续版本改了文件路径/开关名，容器会在日志里提示，按新版文件结构调整即可。
-- 修改前会自动备份：`constant-ext.js.bak_gboxfix`、`nginx.conf.bak_gboxfix`（容器内）。
+- 修改前会自动备份：`constant-ext.js.bak_gboxfix`、`nginx.conf.bak_gboxfix`、`emby.conf.bak_gboxfix`（容器内）。
 - gzip 只压缩文本类响应，视频 302 直链与图片均不走压缩，不影响播放与画质。
 
 ## License
